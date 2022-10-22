@@ -1,0 +1,98 @@
+- name: Base Provisioner for Cluster and Nodes
+  hosts: all
+  become: yes
+  vars:
+    K8S_VERSION: 1.24.3-00
+
+  tasks:
+  - name: Only run "update_cache=yes" if the last one is more than 3600 seconds ago
+    ansible.builtin.apt:
+      update_cache: yes
+      cache_valid_time: 3600
+  - name: copy modules-load.d conf
+    ansible.builtin.copy:
+      src: ./conf/modules-load.d/k8s.conf
+      dest: /etc/modules-load.d/k8s.conf
+      follow: yes
+
+  - name: modeprbing overlay
+    ansible.builtin.command: sudo modprobe overlay
+
+  - name: modeprbing br_netfilter
+    ansible.builtin.command: sudo modprobe br_netfilter
+
+  - name: copy sysctl.d conf
+    ansible.builtin.copy:
+      src: ./conf/sysctl.d/k8s.conf
+      dest: /etc/sysctl.d/k8s.conf
+      follow: yes
+
+  - name: apply system parameters without restart
+    ansible.builtin.command: sudo sysctl --system
+    register: params
+  - debug: msg="{{ params.stdout }}"
+  - debug: msg="{{ params.stderr }}"
+
+  - name: installing containerd
+    ansible.builtin.apt:
+      name: containerd
+      state: present
+
+  - name: configure containerd
+    ansible.builtin.command: sudo mkdir -p /etc/containerd
+
+  - name: generating containerd configurations
+    ansible.builtin.command: sudo containerd config default
+    register: container_conf
+
+  - name: copy output to /etc/containerd/config.toml
+    ansible.builtin.copy:
+      dest: /etc/containerd/config.toml
+      content: "{{ container_conf.stdout }}"
+      mode: 0664
+
+  - name: changing systemd cgroup
+    ansible.builtin.command: sed -i 's/            SystemdCgroup = false/            SystemdCgroup = true/' /etc/containerd/config.toml
+
+  - name: restarting containerd with new config and enabling at startup
+    ansible.builtin.systemd:
+      name: containerd
+      state: restarted
+      enabled: yes
+
+  - name: Download the Google K8S package repository signing key
+    ansible.builtin.get_url:
+      url: https://packages.cloud.google.com/apt/doc/apt-key.gpg
+      dest: /usr/share/keyrings/kubernetes-archive-keyring.gpg
+
+  - name: Add Google K8S package repository source
+    ansible.builtin.apt_repository:
+      filename: kubernetes.list
+      repo: "deb [signed-by=/usr/share/keyrings/kubernetes-archive-keyring.gpg] https://apt.kubernetes.io/ kubernetes-xenial main"
+      update_cache: yes
+
+  - name: installing kubeadm kubectl kubelet
+    ansible.builtin.apt:
+      pkg:
+      - "kubelet={{K8S_VERSION}}"
+      - "kubeadm={{K8S_VERSION}}"
+      - "kubectl={{K8S_VERSION}}"
+      state: present
+      update_cache: yes
+
+  - name: enabling kubelet
+    ansible.builtin.systemd:
+      name: kubelet
+      state: started
+      enabled: yes
+
+  - name: mark hold k8s package to version-"{{K8S_VERSION}}"
+    ansible.builtin.dpkg_selections:
+      name: kubeadm
+      selection: hold
+    ansible.builtin.dpkg_selections:
+      name: kubectl
+      selection: hold
+    ansible.builtin.dpkg_selections:
+      name: kubelet
+      selection: hold
